@@ -105,9 +105,19 @@ def train(model, train_loader, criterion, optimizer, scheduler, device, epochs=5
 # ------------------- 메인 실행 -------------------
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # CUDA 최적화 설정
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
 
     model = SimpleCNN(num_classes=100).to(device)
-    train_loader = get_cifar100_train_loader(batch_size=128, num_workers=4)
+    print("Model created successfully")
+
+    # 배치 사이즈와 num_workers 증가
+    train_loader = get_cifar100_train_loader(batch_size=256, num_workers=8)
+    print("Data loader created successfully")
+    print(f"Number of batches: {len(train_loader)}")
 
     criterion = nn.CrossEntropyLoss()
     optimizer = Adam(model.parameters(), lr=0.001)
