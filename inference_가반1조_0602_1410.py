@@ -81,7 +81,8 @@ def inference_and_save(model_path, test_dir, output_file):
         f.write("number, label\n")
         for fname, pred in zip(filenames, preds):
             number = os.path.splitext(fname)[0]
-            f.write(f"{number}, {pred:02d}\n")
+            formatted_number = f"{int(number):04d}"
+            f.write(f"{formatted_number}, {pred:02d}\n")
 
     print(f"Saved inference results to {output_file}")
 

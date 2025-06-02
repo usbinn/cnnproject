@@ -45,6 +45,7 @@ class SimpleCNN(nn.Module):
 
 # ------------------- 데이터 전처리 및 로딩 -------------------
 def get_cifar100_train_loader(batch_size=128, num_workers=2):
+    print("Starting CIFAR-100 dataset download and processing...")
     mean = (0.5071, 0.4865, 0.4409)
     std = (0.2673, 0.2564, 0.2762)
 
@@ -55,14 +56,18 @@ def get_cifar100_train_loader(batch_size=128, num_workers=2):
         transforms.Normalize(mean, std),
     ])
 
+    print("Downloading CIFAR-100 dataset...")
     trainset = torchvision.datasets.CIFAR100(
         root='./data', train=True, download=True, transform=transform_train
     )
+    print("Dataset downloaded successfully!")
 
+    print("Creating data loader...")
     train_loader = DataLoader(
         trainset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True
+        num_workers=num_workers, pin_memory=True, persistent_workers=True
     )
+    print("Data loader created successfully!")
     return train_loader
 
 # ------------------- 학습 루프 -------------------
@@ -116,7 +121,6 @@ def main():
 
     # 배치 사이즈와 num_workers 증가
     train_loader = get_cifar100_train_loader(batch_size=256, num_workers=8)
-    print("Data loader created successfully")
     print(f"Number of batches: {len(train_loader)}")
 
     criterion = nn.CrossEntropyLoss()
