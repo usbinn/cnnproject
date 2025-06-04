@@ -177,9 +177,27 @@ def train(model, train_loader, criterion, optimizer, scheduler, device, epochs=5
 def inference_and_save(model_path, test_dir, output_file):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # weight 파일 존재 여부 확인
+    if not os.path.exists(model_path):
+        print(f"Error: Weight file '{model_path}' not found!")
+        print("Please train the model first by uncommenting the training section.")
+        return
+
     model = SimpleCNN(num_classes=100).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    
+    try:
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        print(f"Successfully loaded model from {model_path}")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("This might be due to model architecture mismatch.")
+        return
+    
     model.eval()
+
+    if not os.path.exists(test_dir):
+        print(f"Error: Test directory '{test_dir}' not found!")
+        return
 
     inputs, filenames = load_test_images(test_dir)
     inputs = inputs.to(device)
@@ -208,33 +226,33 @@ def main():
     torch.backends.cudnn.deterministic = False
 
     # ============== 학습 모드 (주석 해제하여 사용) ==============
-    # model = SimpleCNN(num_classes=100).to(device)
-    # print("Model created successfully")
+    model = SimpleCNN(num_classes=100).to(device)
+    print("Model created successfully")
 
-    # train_loader = get_cifar100_train_loader(batch_size=64, num_workers=4)
-    # print("Data loader created successfully")
+    train_loader = get_cifar100_train_loader(batch_size=64, num_workers=4)
+    print("Data loader created successfully")
 
-    # criterion = nn.CrossEntropyLoss()
-    # optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
     
-    # # OneCycleLR 스케줄러로 변경
-    # steps_per_epoch = len(train_loader)
-    # scheduler = OneCycleLR(
-    #     optimizer,
-    #     max_lr=0.01,
-    #     epochs=150,
-    #     steps_per_epoch=steps_per_epoch,
-    #     pct_start=0.3,
-    #     anneal_strategy='cos'
-    # )
+    # OneCycleLR 스케줄러로 변경
+    steps_per_epoch = len(train_loader)
+    scheduler = OneCycleLR(
+        optimizer,
+        max_lr=0.01,
+        epochs=150,
+        steps_per_epoch=steps_per_epoch,
+        pct_start=0.3,
+        anneal_strategy='cos'
+    )
 
-    # train(model, train_loader, criterion, optimizer, scheduler, device, epochs=150)
+    train(model, train_loader, criterion, optimizer, scheduler, device, epochs=150)
 
-    # ============== 추론 모드 (기본 활성화) ==============
-    test_dir = "./Dataset/CImages"
-    model_path = "weight_가반1조_0602_1410.pth"
-    output_file = "result_가반1조_0602_1410.txt"
-    inference_and_save(model_path, test_dir, output_file)
+    # ============== 추론 모드 (학습 후 실행) ==============
+    # test_dir = "./Dataset/CImages"
+    # model_path = "weight_가반1조_0602_1410.pth"
+    # output_file = "result_가반1조_0602_1410.txt"
+    # inference_and_save(model_path, test_dir, output_file)
 
 if __name__ == '__main__':
     main()
