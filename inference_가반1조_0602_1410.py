@@ -41,9 +41,12 @@ class SimpleCNN(nn.Module):
 
 # ------------------- 데이터 로딩 -------------------
 def load_test_images(test_dir):
-    image_paths = sorted([os.path.join(test_dir, fname)
-                          for fname in os.listdir(test_dir)
-                          if fname.endswith(('.png', '.jpg', '.jpeg'))])
+    image_paths = [os.path.join(test_dir, fname)
+                  for fname in os.listdir(test_dir)
+                  if fname.endswith(('.png', '.jpg', '.jpeg'))]
+    
+    # Sort numerically by filename (without extension)
+    image_paths.sort(key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
 
     transform = transforms.Compose([
         transforms.Resize((32, 32)),

@@ -14,24 +14,41 @@ class SimpleCNN(nn.Module):
     def __init__(self, num_classes=100):
         super(SimpleCNN, self).__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(3, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout2d(0.25),
 
             nn.Conv2d(128, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout2d(0.25),
+
+            nn.Conv2d(256, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(512, 512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2),
+            nn.Dropout2d(0.25)
         )
 
         self.classifier = nn.Sequential(
-            nn.Linear(256 * 4 * 4, 512),
+            nn.Linear(512 * 4 * 4, 1024),
+            nn.BatchNorm1d(1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(1024, 512),
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.5),
             nn.Linear(512, num_classes)
@@ -52,6 +69,9 @@ def get_cifar100_train_loader(batch_size=128, num_workers=2):
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
+        transforms.RandomRotation(30),
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
+        transforms.RandomAffine(degrees=0, translate=(0.1, 0.1)),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
     ])
@@ -119,15 +139,16 @@ def main():
     model = SimpleCNN(num_classes=100).to(device)
     print("Model created successfully")
 
-    # 배치 사이즈와 num_workers 증가
-    train_loader = get_cifar100_train_loader(batch_size=256, num_workers=8)
-    print(f"Number of batches: {len(train_loader)}")
+    train_loader = get_cifar100_train_loader(batch_size=64, num_workers=4)
+    print("Data loader created successfully")
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = Adam(model.parameters(), lr=0.001)
-    scheduler = StepLR(optimizer, step_size=20, gamma=0.5)
+    optimizer = Adam(model.parameters(), lr=0.0005, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='max', factor=0.5, patience=3, verbose=True
+    )
 
-    train(model, train_loader, criterion, optimizer, scheduler, device, epochs=50)
+    train(model, train_loader, criterion, optimizer, scheduler, device, epochs=150)
 
 if __name__ == '__main__':
     main()
