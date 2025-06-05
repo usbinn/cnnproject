@@ -12,6 +12,7 @@ import numpy as np
 from PIL import Image
 import random
 import math
+from torch.optim import SAM
 
 # Seed 설정 (재현 가능한 결과를 위해)
 def set_seed(seed=42):
@@ -379,14 +380,12 @@ class EnsembleModel(nn.Module):
         return torch.mean(torch.stack(outputs), dim=0)
 
 # 향상된 학습 루프
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=200):
+def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100):
     best_acc = 0.0
     patience = 20
     no_improve = 0
     os.makedirs("checkpoints", exist_ok=True)
     
-    scaler = torch.cuda.amp.GradScaler()  # Mixed precision training
-
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
@@ -397,48 +396,23 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         for batch_idx, (inputs, targets) in enumerate(pbar):
             inputs, targets = inputs.to(device), targets.to(device)
             
-            # 랜덤하게 mixup 또는 cutmix 적용
-            if random.random() < 0.5:
-                # Mixup
-                inputs, targets_a, targets_b, lam = mixup_data(inputs, targets, alpha=0.4)
-                optimizer.zero_grad()
-                
-                with torch.cuda.amp.autocast():
-                    outputs = model(inputs)
-                    loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
-                
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                
-                # 정확도 계산 (근사치)
-                _, preds = outputs.max(1)
-                correct += (lam * preds.eq(targets_a).sum().float() 
-                          + (1 - lam) * preds.eq(targets_b).sum().float())
-            else:
-                # CutMix
-                inputs, targets_a, targets_b, lam = cutmix(inputs, targets, alpha=1.0)
-                optimizer.zero_grad()
-                
-                with torch.cuda.amp.autocast():
-                    outputs = model(inputs)
-                    loss = mixup_criterion(criterion, outputs, targets_a, targets_b, lam)
-                
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                
-                # 정확도 계산 (근사치)
-                _, preds = outputs.max(1)
-                correct += (lam * preds.eq(targets_a).sum().float() 
-                          + (1 - lam) * preds.eq(targets_b).sum().float())
-
+            # First forward-backward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            loss.backward()
+            optimizer.first_step(zero_grad=True)
+            
+            # Second forward-backward pass
+            outputs = model(inputs)
+            criterion(outputs, targets).backward()
+            optimizer.second_step(zero_grad=True)
+            
             running_loss += loss.item() * inputs.size(0)
             total += targets.size(0)
             
-            # 학습률 스케줄러 업데이트
-            if hasattr(scheduler, 'step_batch'):
-                scheduler.step()
+            # 정확도 계산 (근사치)
+            _, preds = outputs.max(1)
+            correct += preds.eq(targets).sum().item()
 
         # Validation
         val_acc = validate(model, val_loader, device)
@@ -561,14 +535,15 @@ def main():
     # Loss function with label smoothing
     criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
     
-    # AdamW optimizer (더 나은 정규화)
-    optimizer = AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
+    # SAM optimizer 설정
+    base_optimizer = AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
+    optimizer = SAM(base_optimizer, model.parameters(), lr=0.001, momentum=0.9)
     
     # Cosine annealing with warm restarts
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
 
     # 학습 실행
-    best_acc = train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=200)
+    best_acc = train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100)
     print(f"Training completed! Best validation accuracy: {best_acc:.2f}%")
 
     # ============== 추론 모드 ==============
