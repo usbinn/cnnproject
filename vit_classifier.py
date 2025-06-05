@@ -13,6 +13,7 @@ from PIL import Image, ImageOps, ImageEnhance
 import os
 import requests
 from tqdm import tqdm
+from safetensors.torch import load_file
 
 class TrivialAugment:
     def __init__(self, num_ops=2, magnitude=10):
@@ -233,27 +234,29 @@ def main():
 
     # Create model directory if it doesn't exist
     os.makedirs('model_weights', exist_ok=True)
-    weights_path = 'model_weights/vit_base_patch16_224.pth'
+    weights_path = 'model_weights/vit_small_patch16_224.safetensors'
 
     # Download weights if they don't exist
     if not os.path.exists(weights_path):
         print("Downloading pretrained weights...")
-        url = "https://huggingface.co/timm/vit_base_patch16_224/resolve/main/model.safetensors"
+        url = "https://huggingface.co/timm/vit_small_patch16_224/resolve/main/model.safetensors"
         download_file(url, weights_path)
         print("Weights downloaded successfully!")
 
     # Create model
     print("Creating model...")
     model = timm.create_model(
-        'vit_base_patch16_224',
-        pretrained=False,
+        'vit_small_patch16_224',
+        pretrained=True,
         num_classes=10,
-        in_chans=3
+        in_chans=3,
+        drop_rate=0.1,
+        drop_path_rate=0.1
     )
     
     # Load pretrained weights
     print("Loading pretrained weights...")
-    state_dict = torch.load(weights_path)
+    state_dict = load_file(weights_path)
     model.load_state_dict(state_dict, strict=False)
     print("Model created and weights loaded successfully!")
 
