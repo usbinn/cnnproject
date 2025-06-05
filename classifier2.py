@@ -6,15 +6,72 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import numpy as np
 from PIL import Image
 import random
 import math
-from sam import SAM
 
-# Seed 설정 (재현 가능한 결과를 위해)
+# SAM optimizer 직접 구현 (pip 버전이 문제있을 때)
+class SAM(torch.optim.Optimizer):
+    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
+        assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
+
+        defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
+        super(SAM, self).__init__(params, defaults)
+
+        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
+        self.param_groups = self.base_optimizer.param_groups
+        self.defaults.update(self.base_optimizer.defaults)
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        grad_norm = self._grad_norm()
+        for group in self.param_groups:
+            scale = group["rho"] / (grad_norm + 1e-12)
+
+            for p in group["params"]:
+                if p.grad is None: continue
+                self.state[p]["old_p"] = p.data.clone()
+                e_w = (torch.pow(p, 2) if group["adaptive"] else 1.0) * p.grad * scale.to(p)
+                p.add_(e_w)  # climb to the local maximum "w + e(w)"
+
+        if zero_grad: self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.grad is None: continue
+                p.data = self.state[p]["old_p"]  # get back to "w" from "w + e(w)"
+
+        self.base_optimizer.step()  # do the actual "sharpness-aware" update
+
+        if zero_grad: self.zero_grad()
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        assert closure is not None, "Sharpness Aware Minimization requires closure, but it was not provided"
+        closure = torch.enable_grad()(closure)  # the closure should do a full forward-backward pass
+
+        self.first_step(zero_grad=True)
+        closure()
+        self.second_step()
+
+    def _grad_norm(self):
+        shared_device = self.param_groups[0]["params"][0].device  # put everything on the same device, in case of model parallelism
+        norm = torch.norm(
+                    torch.stack([
+                        ((torch.abs(p) if group["adaptive"] else 1.0) * p.grad).norm(p=2).to(shared_device)
+                        for group in self.param_groups for p in group["params"]
+                        if p.grad is not None
+                    ]),
+                    p=2
+               )
+        return norm
+
+# Seed 설정
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -117,7 +174,7 @@ class BasicBlock(nn.Module):
         return out
 
 class WideResNet(nn.Module):
-    def __init__(self, depth=28, widen_factor=10, dropout_rate=0.3, num_classes=100):
+    def __init__(self, depth=28, widen_factor=4, dropout_rate=0.3, num_classes=100):
         super(WideResNet, self).__init__()
         self.in_planes = 16
 
@@ -278,22 +335,19 @@ class AutoAugmentTransform:
 
 # 강화된 데이터 로더
 def get_cifar100_train_loader(batch_size=128, num_workers=4):
-    print("Creating enhanced CIFAR-100 dataset with advanced augmentations...")
+    print("Creating CIFAR-100 dataset with enhanced augmentations...")
     
     mean = (0.5071, 0.4865, 0.4409)
     std = (0.2673, 0.2564, 0.2762)
 
-    # 더 강력한 augmentation
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(p=0.5),
         transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
-        transforms.RandomAffine(degrees=0, translate=(0.15, 0.15), scale=(0.8, 1.2)),
-        AutoAugmentTransform(),  # AutoAugment 추가
+        transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
         transforms.ToTensor(),
         transforms.Normalize(mean, std),
-        transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3)),  # Random Erasing
+        transforms.RandomErasing(p=0.3, scale=(0.02, 0.33), ratio=(0.3, 3.3)),
     ])
 
     trainset = torchvision.datasets.CIFAR100(
@@ -302,8 +356,8 @@ def get_cifar100_train_loader(batch_size=128, num_workers=4):
 
     train_loader = DataLoader(
         trainset, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, pin_memory=True, persistent_workers=True,
-        drop_last=True  # 마지막 배치가 작을 때 문제 방지
+        num_workers=num_workers, pin_memory=True,
+        drop_last=True
     )
     
     return train_loader
@@ -379,13 +433,13 @@ class EnsembleModel(nn.Module):
             outputs.append(F.softmax(model(x), dim=1))
         return torch.mean(torch.stack(outputs), dim=0)
 
-# 향상된 학습 루프
-def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100):
+# SAM을 사용한 학습 함수
+def train_model_with_sam(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100):
     best_acc = 0.0
-    patience = 20
+    patience = 15
     no_improve = 0
     os.makedirs("checkpoints", exist_ok=True)
-    
+
     for epoch in range(epochs):
         model.train()
         running_loss = 0.0
@@ -393,30 +447,28 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         total = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}")
-        for batch_idx, (inputs, targets) in enumerate(pbar):
+        for inputs, targets in pbar:
             inputs, targets = inputs.to(device), targets.to(device)
             
-            # First forward-backward pass
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.first_step(zero_grad=True)
+            # SAM requires closure
+            def closure():
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, targets)
+                loss.backward()
+                return loss
             
-            # Second forward-backward pass
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            loss.backward()
-            optimizer.second_step(zero_grad=True)
+            # SAM step
+            loss = optimizer.step(closure)
             
-            # Scheduler step은 base_optimizer에 적용
-            scheduler.step()
-            
-            running_loss += loss.item() * inputs.size(0)
-            total += targets.size(0)
-            
-            # 정확도 계산 (근사치)
-            _, preds = outputs.max(1)
-            correct += preds.eq(targets).sum().item()
+            with torch.no_grad():
+                outputs = model(inputs)
+                _, preds = outputs.max(1)
+                correct += preds.eq(targets).sum().item()
+                total += targets.size(0)
+                running_loss += loss.item() * inputs.size(0)
+
+            pbar.set_postfix({'loss': running_loss/total, 'acc': 100.*correct/total})
 
         # Validation
         val_acc = validate(model, val_loader, device)
@@ -424,21 +476,24 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         epoch_loss = running_loss / total
         train_acc = 100. * correct / total
 
-        print(f"Epoch {epoch+1} | Train Loss: {epoch_loss:.4f} | Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}%")
+        print(f"\nEpoch {epoch+1}")
+        print(f"Train Loss: {epoch_loss:.4f} | Train Acc: {train_acc:.2f}%")
+        print(f"Val Acc: {val_acc:.2f}%")
 
-        # 모델 저장 및 조기 종료
         if val_acc > best_acc:
             best_acc = val_acc
             no_improve = 0
             model_path = "weight_가반1조_0602_1410.pth"
             torch.save(model.state_dict(), model_path)
-            print(f"✅ Saved best model! Val Acc: {best_acc:.2f}%")
+            print(f"✅ New best model saved! (acc: {best_acc:.2f}%)")
         else:
             no_improve += 1
             
         if no_improve >= patience:
             print(f"Early stopping after {epoch+1} epochs")
             break
+
+        scheduler.step()
 
     return best_acc
 
@@ -466,7 +521,7 @@ def inference_with_tta(model_path, test_dir, output_file):
         return
 
     # 최고 성능 모델 로드 (앙상블용으로 여러 모델 사용 가능)
-    model1 = WideResNet(depth=28, widen_factor=10, dropout_rate=0.3, num_classes=100).to(device)
+    model1 = WideResNet(depth=28, widen_factor=4, dropout_rate=0.3, num_classes=100).to(device)
     model2 = EfficientNetCIFAR(num_classes=100).to(device)
     
     try:
@@ -513,39 +568,34 @@ def inference_with_tta(model_path, test_dir, output_file):
     print(f"Saved inference results to {output_file}")
 
 def main():
-    set_seed(42)  # 재현 가능한 결과를 위해
+    set_seed(42)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # CUDA 최적화 설정
     torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = False
 
-    # ============== 학습 모드 ==============
-    # 최고 성능을 위해 Wide ResNet 사용
-    model = WideResNet(depth=28, widen_factor=10, dropout_rate=0.3, num_classes=100).to(device)
-    print("Wide ResNet-28-10 model created successfully")
+    # Wide ResNet 모델 생성 (widen_factor를 4로 줄여서 메모리 절약)
+    model = WideResNet(depth=28, widen_factor=4, dropout_rate=0.3, num_classes=100).to(device)
+    print("Wide ResNet-28-4 model created successfully")
 
     # 데이터 로더
     train_loader = get_cifar100_train_loader(batch_size=128, num_workers=4)
     val_loader = get_cifar100_val_loader(batch_size=128, num_workers=4)
     print("Data loaders created successfully")
 
-    # Loss function with label smoothing
-    criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
+    # Loss function
+    criterion = nn.CrossEntropyLoss()
     
-    # 1. Base optimizer 생성
-    base_optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
-
-    # 2. SAM으로 감쌈
-    optimizer = SAM(model.parameters(), base_optimizer, rho=0.05)
+    # SAM Optimizer
+    optimizer = SAM(model.parameters(), AdamW, lr=0.001, weight_decay=5e-4, rho=0.05)
     
-    # 3. Scheduler는 base_optimizer에 적용
-    scheduler = CosineAnnealingWarmRestarts(base_optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    # Scheduler
+    scheduler = CosineAnnealingLR(optimizer.base_optimizer, T_max=100, eta_min=1e-6)
 
     # 학습 실행
-    best_acc = train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100)
+    best_acc = train_model_with_sam(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100)
     print(f"Training completed! Best validation accuracy: {best_acc:.2f}%")
 
     # ============== 추론 모드 ==============
