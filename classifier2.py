@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 import random
 import math
-from torch.optim import SAM
+from sam import SAM
 
 # Seed 설정 (재현 가능한 결과를 위해)
 def set_seed(seed=42):
@@ -535,9 +535,11 @@ def main():
     # Loss function with label smoothing
     criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
     
-    # SAM optimizer 설정
-    base_optimizer = AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
-    optimizer = SAM(base_optimizer, model.parameters(), lr=0.001, momentum=0.9)
+    # 1. 먼저 base optimizer를 생성 (여기에 lr 설정)
+    base_optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
+
+    # 2. SAM으로 감쌈 (lr 파라미터 없이)
+    optimizer = SAM(model.parameters(), base_optimizer, rho=0.05)
     
     # Cosine annealing with warm restarts
     scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
