@@ -404,8 +404,12 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             
             # Second forward-backward pass
             outputs = model(inputs)
-            criterion(outputs, targets).backward()
+            loss = criterion(outputs, targets)
+            loss.backward()
             optimizer.second_step(zero_grad=True)
+            
+            # Scheduler step은 base_optimizer에 적용
+            scheduler.step()
             
             running_loss += loss.item() * inputs.size(0)
             total += targets.size(0)
@@ -435,10 +439,6 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         if no_improve >= patience:
             print(f"Early stopping after {epoch+1} epochs")
             break
-            
-        # 스케줄러 업데이트 (epoch 기반)
-        if hasattr(scheduler, 'step') and not hasattr(scheduler, 'step_batch'):
-            scheduler.step()
 
     return best_acc
 
@@ -535,14 +535,14 @@ def main():
     # Loss function with label smoothing
     criterion = LabelSmoothingCrossEntropy(smoothing=0.1)
     
-    # 1. 먼저 base optimizer를 생성 (여기에 lr 설정)
+    # 1. Base optimizer 생성
     base_optimizer = torch.optim.AdamW(model.parameters(), lr=0.001, weight_decay=0.05)
 
-    # 2. SAM으로 감쌈 (lr 파라미터 없이)
+    # 2. SAM으로 감쌈
     optimizer = SAM(model.parameters(), base_optimizer, rho=0.05)
     
-    # Cosine annealing with warm restarts
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=10, T_mult=2, eta_min=1e-6)
+    # 3. Scheduler는 base_optimizer에 적용
+    scheduler = CosineAnnealingWarmRestarts(base_optimizer, T_0=10, T_mult=2, eta_min=1e-6)
 
     # 학습 실행
     best_acc = train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, device, epochs=100)
