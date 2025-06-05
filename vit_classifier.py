@@ -5,12 +5,14 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import timm
 from timm.data import create_transform
-from timm.data.transforms import _pil_interp
 import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import random
 from PIL import Image, ImageOps, ImageEnhance
+import os
+import requests
+from tqdm import tqdm
 
 class TrivialAugment:
     def __init__(self, num_ops=2, magnitude=10):
@@ -199,6 +201,18 @@ def validate(model, val_loader, criterion, device):
 
     return total_loss / len(val_loader), 100. * correct / total
 
+def download_file(url, filename):
+    response = requests.get(url, stream=True)
+    total_size = int(response.headers.get('content-length', 0))
+    block_size = 1024
+    progress_bar = tqdm(total=total_size, unit='iB', unit_scale=True)
+    
+    with open(filename, 'wb') as f:
+        for data in response.iter_content(block_size):
+            progress_bar.update(len(data))
+            f.write(data)
+    progress_bar.close()
+
 def main():
     # Set random seed
     torch.manual_seed(42)
@@ -217,9 +231,34 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False, num_workers=4, pin_memory=True)
 
+    # Create model directory if it doesn't exist
+    os.makedirs('model_weights', exist_ok=True)
+    weights_path = 'model_weights/vit_base_patch16_224.pth'
+
+    # Download weights if they don't exist
+    if not os.path.exists(weights_path):
+        print("Downloading pretrained weights...")
+        url = "https://huggingface.co/timm/vit_base_patch16_224/resolve/main/model.safetensors"
+        download_file(url, weights_path)
+        print("Weights downloaded successfully!")
+
     # Create model
-    model = timm.create_model('vit_base_patch16_224', pretrained=True, num_classes=10)
+    print("Creating model...")
+    model = timm.create_model(
+        'vit_base_patch16_224',
+        pretrained=False,
+        num_classes=10,
+        in_chans=3
+    )
+    
+    # Load pretrained weights
+    print("Loading pretrained weights...")
+    state_dict = torch.load(weights_path)
+    model.load_state_dict(state_dict, strict=False)
+    print("Model created and weights loaded successfully!")
+
     model = model.to(device)
+    print(f"Model moved to {device}")
 
     # Create optimizer and scheduler
     base_optimizer = AdamW
